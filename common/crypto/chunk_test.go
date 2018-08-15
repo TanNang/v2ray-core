@@ -4,6 +4,7 @@ import (
 	"io"
 	"testing"
 
+	"v2ray.com/core/common"
 	"v2ray.com/core/common/buf"
 	. "v2ray.com/core/common/crypto"
 	. "v2ray.com/ext/assert"
@@ -18,19 +19,22 @@ func TestChunkStreamIO(t *testing.T) {
 	reader := NewChunkStreamReader(PlainChunkSizeParser{}, cache)
 
 	b := buf.New()
-	b.AppendBytes('a', 'b', 'c', 'd')
-	assert(writer.WriteMultiBuffer(buf.NewMultiBufferValue(b)), IsNil)
+	b.WriteBytes('a', 'b', 'c', 'd')
+	common.Must(writer.WriteMultiBuffer(buf.NewMultiBufferValue(b)))
 
 	b = buf.New()
-	b.AppendBytes('e', 'f', 'g')
-	assert(writer.WriteMultiBuffer(buf.NewMultiBufferValue(b)), IsNil)
+	b.WriteBytes('e', 'f', 'g')
+	common.Must(writer.WriteMultiBuffer(buf.NewMultiBufferValue(b)))
 
-	assert(writer.WriteMultiBuffer(buf.MultiBuffer{}), IsNil)
+	common.Must(writer.WriteMultiBuffer(buf.MultiBuffer{}))
 
-	assert(cache.Len(), Equals, int32(13))
+	if cache.Len() != 13 {
+		t.Fatalf("Cache length is %d, want 13", cache.Len())
+	}
 
 	mb, err := reader.ReadMultiBuffer()
-	assert(err, IsNil)
+	common.Must(err)
+
 	assert(mb.Len(), Equals, int32(4))
 	assert(mb[0].Bytes(), Equals, []byte("abcd"))
 

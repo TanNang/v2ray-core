@@ -17,7 +17,9 @@ import (
 	"v2ray.com/core/common/net"
 	"v2ray.com/core/common/protocol"
 	"v2ray.com/core/common/serial"
+	"v2ray.com/core/common/session"
 	"v2ray.com/core/common/signal"
+	"v2ray.com/core/common/task"
 	"v2ray.com/core/common/uuid"
 	"v2ray.com/core/proxy/vmess"
 	"v2ray.com/core/proxy/vmess/encoding"
@@ -168,8 +170,6 @@ func (h *Handler) RemoveUser(ctx context.Context, email string) error {
 }
 
 func transferRequest(timer signal.ActivityUpdater, session *encoding.ServerSession, request *protocol.RequestHeader, input io.Reader, output buf.Writer) error {
-	defer common.Close(output)
-
 	bodyReader := session.DecodeRequestBody(request, input)
 	if err := buf.Copy(bodyReader, output, buf.UpdateActivity(timer)); err != nil {
 		return newError("failed to transfer request").Base(err)
@@ -224,10 +224,9 @@ func (h *Handler) Process(ctx context.Context, network net.Network, connection i
 		return newError("unable to set read deadline").Base(err).AtWarning()
 	}
 
-	reader := &buf.BufferedReader{Reader: buf.NewReader(connection)}
-
-	session := encoding.NewServerSession(h.clients, h.sessionHistory)
-	request, err := session.DecodeRequestHeader(reader)
+	reader := &buf.BufferedReader{Reader: &buf.SingleReader{Reader: connection}}
+	svrSession := encoding.NewServerSession(h.clients, h.sessionHistory)
+	request, err := svrSession.DecodeRequestHeader(reader)
 
 	if err != nil {
 		if errors.Cause(err) != io.EOF {
@@ -261,10 +260,10 @@ func (h *Handler) Process(ctx context.Context, network net.Network, connection i
 		})
 	}
 
-	newError("received request for ", request.Destination()).WithContext(ctx).WriteToLog()
+	newError("received request for ", request.Destination()).WriteToLog(session.ExportIDToError(ctx))
 
 	if err := connection.SetReadDeadline(time.Time{}); err != nil {
-		newError("unable to set back read deadline").Base(err).WithContext(ctx).WriteToLog()
+		newError("unable to set back read deadline").Base(err).WriteToLog(session.ExportIDToError(ctx))
 	}
 
 	sessionPolicy = h.policyManager.ForLevel(request.User.Level)
@@ -281,7 +280,10 @@ func (h *Handler) Process(ctx context.Context, network net.Network, connection i
 
 	requestDone := func() error {
 		defer timer.SetTimeout(sessionPolicy.Timeouts.DownlinkOnly)
-		return transferRequest(timer, session, request, reader, link.Writer)
+		if sessionPolicy.Buffer.PerConnection > 0 {
+			reader.Reader = buf.NewReader(connection)
+		}
+		return transferRequest(timer, svrSession, request, reader, link.Writer)
 	}
 
 	responseDone := func() error {
@@ -292,10 +294,11 @@ func (h *Handler) Process(ctx context.Context, network net.Network, connection i
 		response := &protocol.ResponseHeader{
 			Command: h.generateCommand(ctx, request),
 		}
-		return transferResponse(timer, session, request, response, link.Reader, writer)
+		return transferResponse(timer, svrSession, request, response, link.Reader, writer)
 	}
 
-	if err := signal.ExecuteParallel(ctx, requestDone, responseDone); err != nil {
+	var requestDonePost = task.Single(requestDone, task.OnSuccess(task.Close(link.Writer)))
+	if err := task.Run(task.WithContext(ctx), task.Parallel(requestDonePost, responseDone))(); err != nil {
 		pipe.CloseError(link.Reader)
 		pipe.CloseError(link.Writer)
 		return newError("connection ends").Base(err)
@@ -310,7 +313,7 @@ func (h *Handler) generateCommand(ctx context.Context, request *protocol.Request
 		if h.inboundHandlerManager != nil {
 			handler, err := h.inboundHandlerManager.GetHandler(ctx, tag)
 			if err != nil {
-				newError("failed to get detour handler: ", tag).Base(err).AtWarning().WithContext(ctx).WriteToLog()
+				newError("failed to get detour handler: ", tag).Base(err).AtWarning().WriteToLog(session.ExportIDToError(ctx))
 				return nil
 			}
 			proxyHandler, port, availableMin := handler.GetRandomInboundProxy()
@@ -320,7 +323,7 @@ func (h *Handler) generateCommand(ctx context.Context, request *protocol.Request
 					availableMin = 255
 				}
 
-				newError("pick detour handler for port ", port, " for ", availableMin, " minutes.").AtDebug().WithContext(ctx).WriteToLog()
+				newError("pick detour handler for port ", port, " for ", availableMin, " minutes.").AtDebug().WriteToLog(session.ExportIDToError(ctx))
 				user := inboundHandler.GetUser(request.User.Email)
 				if user == nil {
 					return nil

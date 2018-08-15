@@ -21,31 +21,14 @@ func ReadAllToMultiBuffer(reader io.Reader) (MultiBuffer, error) {
 	return mb, nil
 }
 
-// ReadSizeToMultiBuffer reads specific number of bytes from reader into a MultiBuffer.
-func ReadSizeToMultiBuffer(reader io.Reader, size int32) (MultiBuffer, error) {
-	mb := NewMultiBufferCap(32)
-
-	for size > 0 {
-		bSize := size
-		if bSize > Size {
-			bSize = Size
-		}
-		b := NewSize(bSize)
-		if err := b.Reset(ReadFullFrom(reader, bSize)); err != nil {
-			mb.Release()
-			return nil, err
-		}
-		size -= bSize
-		mb.Append(b)
-	}
-	return mb, nil
-}
-
 // ReadAllToBytes reads all content from the reader into a byte array, until EOF.
 func ReadAllToBytes(reader io.Reader) ([]byte, error) {
 	mb, err := ReadAllToMultiBuffer(reader)
 	if err != nil {
 		return nil, err
+	}
+	if mb.Len() == 0 {
+		return nil, nil
 	}
 	b := make([]byte, mb.Len())
 	common.Must2(mb.Read(b))
@@ -97,7 +80,7 @@ func (mb *MultiBuffer) ReadFrom(reader io.Reader) (int64, error) {
 
 	for {
 		b := New()
-		err := b.Reset(ReadFrom(reader))
+		err := b.Reset(ReadFullFrom(reader, Size))
 		if b.IsEmpty() {
 			b.Release()
 		} else {
@@ -105,7 +88,7 @@ func (mb *MultiBuffer) ReadFrom(reader io.Reader) (int64, error) {
 		}
 		totalBytes += int64(b.Len())
 		if err != nil {
-			if errors.Cause(err) == io.EOF {
+			if errors.Cause(err) == io.EOF || errors.Cause(err) == io.ErrUnexpectedEOF {
 				return totalBytes, nil
 			}
 			return totalBytes, err
@@ -115,7 +98,7 @@ func (mb *MultiBuffer) ReadFrom(reader io.Reader) (int64, error) {
 
 // Read implements io.Reader.
 func (mb *MultiBuffer) Read(b []byte) (int, error) {
-	if mb.Len() == 0 {
+	if mb.IsEmpty() {
 		return 0, io.EOF
 	}
 	endIndex := len(*mb)
@@ -175,6 +158,9 @@ func (mb *MultiBuffer) Write(b []byte) (int, error) {
 // WriteMultiBuffer implements Writer.
 func (mb *MultiBuffer) WriteMultiBuffer(b MultiBuffer) error {
 	*mb = append(*mb, b...)
+	for i := range b {
+		b[i] = nil
+	}
 	return nil
 }
 

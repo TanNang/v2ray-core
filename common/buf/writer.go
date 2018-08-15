@@ -12,19 +12,26 @@ type BufferToBytesWriter struct {
 	io.Writer
 }
 
-// NewBufferToBytesWriter returns a new BufferToBytesWriter.
-func NewBufferToBytesWriter(writer io.Writer) *BufferToBytesWriter {
-	return &BufferToBytesWriter{
-		Writer: writer,
-	}
-}
-
 // WriteMultiBuffer implements Writer. This method takes ownership of the given buffer.
 func (w *BufferToBytesWriter) WriteMultiBuffer(mb MultiBuffer) error {
 	defer mb.Release()
 
+	size := mb.Len()
+	if size == 0 {
+		return nil
+	}
+
 	bs := mb.ToNetBuffers()
-	return common.Error2(bs.WriteTo(w.Writer))
+
+	for size > 0 {
+		n, err := bs.WriteTo(w.Writer)
+		if err != nil {
+			return err
+		}
+		size -= int32(n)
+	}
+
+	return nil
 }
 
 // ReadFrom implements io.ReaderFrom.
@@ -112,14 +119,28 @@ func (w *BufferedWriter) WriteMultiBuffer(b MultiBuffer) error {
 
 // Flush flushes buffered content into underlying writer.
 func (w *BufferedWriter) Flush() error {
-	if !w.buffer.IsEmpty() {
-		if err := w.writer.WriteMultiBuffer(NewMultiBufferValue(w.buffer)); err != nil {
-			return err
+	if w.buffer.IsEmpty() {
+		return nil
+	}
+
+	b := w.buffer
+	w.buffer = nil
+
+	if writer, ok := w.writer.(io.Writer); ok {
+		defer b.Release()
+
+		for !b.IsEmpty() {
+			n, err := writer.Write(b.Bytes())
+			if err != nil {
+				return err
+			}
+			b.Advance(int32(n))
 		}
 
-		w.buffer = nil
+		return nil
 	}
-	return nil
+
+	return w.writer.WriteMultiBuffer(NewMultiBufferValue(b))
 }
 
 // SetBuffered sets whether the internal buffer is used. If set to false, Flush() will be called to clear the buffer.
@@ -150,18 +171,17 @@ func (w *BufferedWriter) Close() error {
 	return common.Close(w.writer)
 }
 
-type seqWriter struct {
-	writer io.Writer
+// SequentialWriter is a Writer that writes MultiBuffer sequentially into the underlying io.Writer.
+type SequentialWriter struct {
+	io.Writer
 }
 
-func (w *seqWriter) WriteMultiBuffer(mb MultiBuffer) error {
+// WriteMultiBuffer implements Writer.
+func (w *SequentialWriter) WriteMultiBuffer(mb MultiBuffer) error {
 	defer mb.Release()
 
 	for _, b := range mb {
-		if b.IsEmpty() {
-			continue
-		}
-		if _, err := w.writer.Write(b.Bytes()); err != nil {
+		if err := WriteAllBytes(w.Writer, b.Bytes()); err != nil {
 			return err
 		}
 	}
